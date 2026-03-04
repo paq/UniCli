@@ -1,39 +1,41 @@
 # UniCli
 
+[![GitHub Release](https://img.shields.io/github/v/release/yucchiy/UniCli)](https://github.com/yucchiy/UniCli/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A command-line interface for controlling Unity Editor from the terminal.
 UniCli lets you compile scripts, run tests, manage packages, inspect GameObjects, and more — all without leaving your terminal.
 
 Designed to work with AI coding agents such as [Claude Code](https://docs.anthropic.com/en/docs/claude-code), UniCli gives AI the ability to interact with Unity Editor directly through structured CLI commands with JSON output.
 
-## How It Works
+- **80+ built-in commands**: compile, test, build, inspect GameObjects, manage scenes/prefabs/packages, and more
+- **Dynamic C# execution**: run arbitrary C# code in Unity via `unicli eval`
+- **Extensible**: add custom commands with a single C# class
+- **AI-agent ready**: structured JSON output, Claude Code plugin, and Agent Skills support
+- **Cross-platform**: NativeAOT binaries for macOS (arm64/x64) and Windows (x64)
 
-UniCli consists of two components:
+## Table of Contents
 
-- **CLI** (`unicli`) — A NativeAOT-compiled binary that you run from the terminal
-- **Unity Package** (`com.yucchiy.unicli-server`) — An Editor plugin that receives and executes commands inside Unity
+- [Getting Started](#getting-started)
+- [CLI Usage](#cli-usage)
+- [Executing Commands](#executing-commands)
+- [Dynamic Code Execution (Eval)](#dynamic-code-execution-eval)
+- [Custom Commands](#custom-commands)
+- [Built-in Commands](#built-in-commands)
+- [Module Management](#module-management)
+- [Architecture](#architecture)
+- [Remote Commands](#remote-commands)
+- [AI Agent Integration](#ai-agent-integration)
+- [License](#license)
 
-### Architecture
+## Getting Started
 
-```
-┌──────────┐  Named Pipe     ┌────────────────┐  PlayerConnection  ┌────────────────┐
-│  unicli  │◄───────────────►│  Unity Editor  │◄──────────────────►│     Device     │
-│  (CLI)   │ Length-prefixed │  (Server)      │ Chunked messages   │  (Dev Build)   │
-│          │ JSON messages   │                │                    │                │
-└──────────┘                 └────────────────┘                    └────────────────┘
-```
+UniCli requires two components: the **CLI** (`unicli`) installed on your machine, and the **Unity Package** (`com.yucchiy.unicli-server`) installed in your Unity project. Both must be set up for UniCli to work.
 
-**CLI ↔ Editor (Named Pipe):**
-The CLI and Unity Editor communicate over a named pipe. The pipe name is derived from a SHA256 hash of the project's `Assets` path, so each project gets its own connection. Messages use a length-prefixed JSON framing protocol with a handshake (magic bytes `UCLI` + protocol version). The server plugin initializes via `[InitializeOnLoad]`, creates a background listener on the named pipe, and enqueues incoming commands to a `ConcurrentQueue`. Commands are dequeued and executed on Unity's main thread every frame via `EditorApplication.update`.
-
-**Editor ↔ Device (PlayerConnection):**
-For remote debugging, the Editor relays commands to a running Development Build via Unity's `PlayerConnection`. The runtime module (`UniCli.Remote`) auto-initializes a `RuntimeDebugReceiver` on the device, which discovers debug commands via reflection and registers message handlers. Responses are split into 16 KB chunks to work around PlayerConnection's undocumented message size limits. The Editor's `RemoteBridge` reassembles chunks and returns the complete response to the CLI.
-
-## Requirements
+### Requirements
 
 - Unity 2022.3 or later
 - macOS (arm64 / x64) or Windows (x64)
-
-## Installation
 
 ### CLI
 
@@ -67,7 +69,28 @@ Or add it manually via Unity Package Manager using the git URL:
 https://github.com/yucchiy/UniCli.git?path=src/UniCli.Unity/Packages/com.yucchiy.unicli-server
 ```
 
-## CLI Subcommands
+### Quick Usage
+
+Open your Unity project in the Editor, then run `unicli` from the Unity project directory (or any subdirectory). UniCli automatically detects the project by looking for an `Assets` folder in the current directory and its ancestors.
+
+```bash
+# Verify connection
+unicli check
+
+# List all available commands
+unicli commands
+
+# Compile scripts
+unicli exec Compile
+
+# Run EditMode tests
+unicli exec TestRunner.RunEditMode
+
+# Execute arbitrary C# code (--json for JSON output)
+unicli eval 'return Application.unityVersion;' --json
+```
+
+## CLI Usage
 
 The `unicli` binary provides the following subcommands:
 
@@ -102,43 +125,6 @@ UNICLI_PROJECT=/path/to/my/unity-project unicli exec Compile --json
 
 # Useful when the current directory is not inside the Unity project
 UNICLI_PROJECT=src/UniCli.Unity unicli commands --json
-```
-
-The pipe name used for communication is derived from the project path, so each Unity project gets its own connection.
-
-
-## Dynamic Code Execution (Eval)
-
-`unicli eval` compiles and executes arbitrary C# code in the Unity Editor context using `AssemblyBuilder`. Code has full access to Unity APIs including `UnityEngine` and `UnityEditor`.
-
-```bash
-unicli eval '<code>' [--json] [--declarations '<decl>'] [--timeout <ms>]
-```
-
-| Option | Description |
-|---|---|
-| `--json` | Output in JSON format |
-| `--declarations` | Additional type declarations (classes, structs, enums) |
-| `--timeout` | Timeout in milliseconds |
-
-For multi-line code, use shell heredocs:
-
-```bash
-unicli eval "$(cat <<'EOF'
-var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
-var objects = GameObject.FindObjectsOfType<GameObject>(true);
-return $"{scene.name}: {objects.Length} objects";
-EOF
-)" --json
-```
-
-The result is returned as raw JSON. If the return type is `[Serializable]`, it is serialized with `JsonUtility`. `UnityEngine.Object` types use `EditorJsonUtility`. Primitives and strings are returned directly. Code that doesn't return a value (`void` operations) returns `null`.
-
-Eval code supports `async`/`await` and receives a `cancellationToken` variable (`System.Threading.CancellationToken`) that is cancelled when the client disconnects. Use it for cooperative cancellation of long-running operations:
-
-```bash
-# Wait asynchronously with cancellation support
-unicli eval 'await Task.Delay(5000, cancellationToken); return "done";' --json
 ```
 
 
@@ -185,498 +171,106 @@ These options can be combined with any `exec` command:
 
 By default, when the server is not responding (e.g., after an assembly reload), the CLI automatically brings Unity Editor to the foreground using a PID file (`Library/UniCli/server.pid`) and restores focus to the original application once the command completes. Use `--no-focus` to disable this behavior, or set the `UNICLI_FOCUS` environment variable to `0` or `false` to disable it globally.
 
-For example:
-
-```bash
-unicli exec Compile --json
-unicli exec Compile --timeout 30000
-unicli exec GameObject.Find --help
-```
-
 ### Examples
 
 ```bash
-# Compile scripts
-unicli exec Compile
+# Compile scripts (--json for JSON output, --timeout to set deadline)
+unicli exec Compile --json
+unicli exec Compile --timeout 30000
 
 # Build the player
 unicli exec BuildPlayer.Build --locationPathName "Builds/Test.app"
-unicli exec BuildPlayer.Build --locationPathName "Builds/Test.app" --options Development
-unicli exec BuildPlayer.Build --locationPathName "Builds/Test.app" --options Development --options ConnectWithProfiler
-unicli exec BuildPlayer.Build --locationPathName "Builds/Test.app" --target Android --scenes "Assets/Scenes/Main.unity"
+unicli exec BuildPlayer.Build --locationPathName "Builds/Test.app" --options Development --target Android
 
-# Compile player scripts for a specific build target
-unicli exec BuildPlayer.Compile
-unicli exec BuildPlayer.Compile --target Android
-unicli exec BuildPlayer.Compile --target iOS --extraScriptingDefines MY_DEFINE --extraScriptingDefines ANOTHER_DEFINE
-
-# Get/switch the active build target
-unicli exec BuildTarget.GetActive
-unicli exec BuildTarget.Switch --target Android
-unicli exec BuildTarget.Switch --target iOS
-
-# Build profiles (Unity 6+ only)
-unicli exec BuildProfile.List
-unicli exec BuildProfile.GetActive
-unicli exec BuildProfile.SetActive '{"path":"Assets/Settings/MyProfile.asset"}'
-unicli exec BuildProfile.Inspect '{"path":"Assets/Settings/MyProfile.asset"}'
-
-# List available connection targets (players/devices)
-unicli exec Connection.List
-
-# Get current connection status
-unicli exec Connection.Status
-
-# Connect to a target by ID, IP, or device ID
-unicli exec Connection.Connect '{"id":-1}'
-unicli exec Connection.Connect '{"ip":"192.168.1.100"}'
-unicli exec Connection.Connect '{"deviceId":"DEVICE_SERIAL"}'
-
-# Run tests (default: only failed/skipped results returned)
+# Run tests
 unicli exec TestRunner.RunEditMode
-unicli exec TestRunner.RunPlayMode
-unicli exec TestRunner.RunEditMode --testNameFilter MyTest
-
-# Include all results (including passed)
+unicli exec TestRunner.RunEditMode --testNameFilter MyTest --stackTraceLines 3
 unicli exec TestRunner.RunEditMode --resultFilter all
 
-# Include stack traces for failures (first 3 lines)
-unicli exec TestRunner.RunEditMode --stackTraceLines 3
-
-# Full stack traces
-unicli exec TestRunner.RunEditMode --stackTraceLines -1
-
-# Summary counts only (no individual results)
-unicli exec TestRunner.RunEditMode --resultFilter none
-
-# Find GameObjects
+# Find and inspect GameObjects
 unicli exec GameObject.Find --name "Main Camera"
-unicli exec GameObject.Find --tag Player --includeInactive
 unicli exec GameObject.GetHierarchy
 unicli exec GameObject.GetComponents --instanceId 1234
-unicli exec GameObject.AddComponent --path "Player" --typeName BoxCollider
-unicli exec GameObject.RemoveComponent --componentInstanceId 1234
 
-# Create GameObjects
+# Create and modify GameObjects
 unicli exec GameObject.Create --name "Enemy"
-unicli exec GameObject.Create --name "Child" --parent "Enemy"
-unicli exec GameObject.Create --name "WithCollider" --components BoxCollider
-unicli exec GameObject.CreatePrimitive --primitiveType Cube
-unicli exec GameObject.CreatePrimitive --primitiveType Sphere --name "Ball" --parent "Enemy"
+unicli exec GameObject.SetTransform --path "Enemy" --position 1,2,3 --rotation 0,90,0
+unicli exec GameObject.AddComponent --path "Enemy" --typeName BoxCollider
 
-# Modify GameObjects
-unicli exec GameObject.Rename --path "Enemy" --name "Boss"
-unicli exec GameObject.SetTransform --path "Boss" --position 1,2,3 --rotation 0,90,0
-unicli exec GameObject.Duplicate --path "Boss"
-unicli exec GameObject.SetParent --path "Boss(Clone)" --parentPath "Boss"
-unicli exec GameObject.Destroy --path "Boss(Clone)"
+# Scene operations
+unicli exec Scene.Open --path "Assets/Scenes/Level1.unity"
+unicli exec Scene.Save --all
 
 # Set component properties
 unicli exec Component.SetProperty --componentInstanceId 1234 --propertyPath "m_IsKinematic" --value "true"
 
-# Set ObjectReference properties (e.g. assign a material to a renderer)
-unicli exec Component.SetProperty --componentInstanceId 1234 --propertyPath "m_Materials.Array.data[0]" --value "guid:abc123def456"
-unicli exec Component.SetProperty --componentInstanceId 1234 --propertyPath "m_Mesh" --value "Assets/Meshes/Custom.mesh"
-unicli exec Component.SetProperty --componentInstanceId 1234 --propertyPath "m_Material" --value "null"
-
-# Material operations
-unicli exec Material.Create --assetPath "Assets/Materials/MyMat.mat"
-unicli exec Material.Create --assetPath "Assets/Materials/MyMat.mat" --shader "Standard"
-unicli exec Material.Inspect --guid "abc123def456"
-unicli exec Material.SetColor --guid "abc123def456" --name "_Color" --value '{"r":1,"g":0,"b":0,"a":1}'
-unicli exec Material.GetColor --guid "abc123def456" --name "_Color"
-unicli exec Material.SetFloat --guid "abc123def456" --name "_Metallic" --value 0.8
-unicli exec Material.GetFloat --guid "abc123def456" --name "_Metallic"
-
-# AnimatorController operations
-unicli exec AnimatorController.Create --assetPath "Assets/Animations/Player.controller"
-unicli exec AnimatorController.Inspect --assetPath "Assets/Animations/Player.controller"
-unicli exec AnimatorController.AddParameter --assetPath "Assets/Animations/Player.controller" --name "Speed" --type Float
-unicli exec AnimatorController.AddState --assetPath "Assets/Animations/Player.controller" --name "Idle"
-unicli exec AnimatorController.AddState --assetPath "Assets/Animations/Player.controller" --name "Walk"
-unicli exec AnimatorController.AddTransition --assetPath "Assets/Animations/Player.controller" --sourceStateName "Idle" --destinationStateName "Walk"
-unicli exec AnimatorController.AddTransitionCondition --assetPath "Assets/Animations/Player.controller" --sourceStateName "Idle" --destinationStateName "Walk" --parameter "Speed" --mode Greater --threshold 0.1
-
-# Animator component operations
-unicli exec Animator.SetController --path "Player" --controllerAssetPath "Assets/Animations/Player.controller"
-unicli exec Animator.Inspect --path "Player"
-
-# Prefab operations
-unicli exec Prefab.GetStatus --path "MyPrefabInstance"
-unicli exec Prefab.Instantiate --assetPath "Assets/Prefabs/Enemy.prefab"
-unicli exec Prefab.Save --path "Player" --assetPath "Assets/Prefabs/Player.prefab"
-unicli exec Prefab.Apply --path "MyPrefabInstance"
-unicli exec Prefab.Unpack --path "MyPrefabInstance" --completely
-
-# Selection operations
-unicli exec Selection.Get
-unicli exec Selection.SetGameObject --path "Main Camera"
-unicli exec Selection.SetAsset --path "Assets/Materials/MyMat.mat"
-
-# Window operations
-unicli exec Window.List
-unicli exec Window.Open --typeName "UnityEditor.ConsoleWindow"
-unicli exec Window.Focus --typeName "UnityEditor.SceneView"
-
-# Search Unity project using Unity Search API
-unicli exec Search --query "t:Material"
-unicli exec Search --query "t:Prefab" --maxResults 10
-
-# Delete an asset
-unicli exec AssetDatabase.Delete --path "Assets/Prefabs/Old.prefab"
-
-# Manage packages
-unicli exec PackageManager.List
-unicli exec PackageManager.Add --packageIdOrName com.unity.mathematics
-unicli exec PackageManager.Remove --packageIdOrName com.unity.mathematics
-unicli exec PackageManager.GetInfo --name com.unity.test-framework
-unicli exec PackageManager.Update --name com.unity.test-framework
-unicli exec PackageManager.Update --name com.unity.test-framework --version 1.4.5
-
-# Scene operations
-unicli exec Scene.List
-unicli exec Scene.GetActive
-unicli exec Scene.Open --path "Assets/Scenes/Level1.unity"
-unicli exec Scene.Open --path "Assets/Scenes/Additive.unity" --additive
-unicli exec Scene.SetActive --name "Level1"
-unicli exec Scene.Save --all
-unicli exec Scene.Save --name "Level1" --saveAsPath "Assets/Scenes/Level1_backup.unity"
-unicli exec Scene.Close --name "Additive"
-unicli exec Scene.New --empty --additive
-
-# Settings — inspect all values
-unicli exec PlayerSettings.Inspect
-unicli exec EditorSettings.Inspect
-
-# Settings — modify values via eval
-unicli eval 'PlayerSettings.companyName = "MyCompany";' --json
-unicli eval 'PlayerSettings.SetScriptingBackend(UnityEditor.Build.NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);' --json
-
-# Execute menu items
-unicli exec Menu.Execute --menuPath "Window/General/Console"
-
 # Console logs
-unicli exec Console.GetLog
-unicli exec Console.GetLog --logType "Warning,Error"  # filter by multiple types
-unicli exec Console.GetLog --logType Error --stackTraceLines 3  # with first 3 stack trace lines
-unicli exec Console.Clear
+unicli exec Console.GetLog --logType "Warning,Error"
 
-# Dynamic C# code execution (Eval)
-unicli eval 'return Application.unityVersion;' --json
-unicli eval 'return PlayerSettings.productName;' --json
+# Show command parameters and usage
+unicli exec GameObject.Find --help
+```
 
-# Multi-line code with heredoc
+See [Built-in Commands](#built-in-commands) for the full list of available commands.
+
+
+## Dynamic Code Execution (Eval)
+
+`unicli eval` compiles and executes arbitrary C# code in the Unity Editor context using `AssemblyBuilder`.
+Code has full access to Unity APIs (`UnityEngine`, `UnityEditor`) as well as any packages and libraries referenced by the project.
+
+```bash
+unicli eval '<code>' [--json] [--declarations '<decl>'] [--timeout <ms>]
+```
+
+| Option | Description |
+|---|---|
+| `--json` | Output in JSON format |
+| `--declarations` | Additional type declarations (classes, structs, enums) |
+| `--timeout` | Timeout in milliseconds |
+
+For multi-line code, use shell heredocs:
+
+```bash
 unicli eval "$(cat <<'EOF'
-var go = GameObject.Find("Main Camera");
-return go.transform.position;
+var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+var objects = GameObject.FindObjectsOfType<GameObject>(true);
+return $"{scene.name}: {objects.Length} objects";
 EOF
 )" --json
+```
 
-# Void operations (no return value needed)
+The result is returned as raw JSON. If the return type is `[Serializable]`, it is serialized with `JsonUtility`.
+`UnityEngine.Object` types use `EditorJsonUtility`. Primitives and strings are returned directly. Code that doesn't return a value (`void` operations) returns `null`.
+
+Use `--declarations` to define custom types for structured return values:
+
+```bash
 unicli eval "$(cat <<'EOF'
-var go = new GameObject("Created by Eval");
-go.AddComponent<BoxCollider>();
-EOF
-)" --json
-
-# Async/await (the generated code receives a cancellationToken variable)
-unicli eval 'await Task.Delay(100, cancellationToken); return "done";' --json
-
-# Custom type declarations with --declarations
-unicli eval "$(cat <<'EOF'
-var stats = new MyStats();
-stats.objectCount = GameObject.FindObjectsOfType<GameObject>().Length;
+var stats = new SceneStats();
 stats.sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+stats.objectCount = GameObject.FindObjectsOfType<GameObject>().Length;
 return stats;
 EOF
 )" --declarations "$(cat <<'EOF'
 [System.Serializable]
-public class MyStats
+public class SceneStats
 {
-    public int objectCount;
     public string sceneName;
+    public int objectCount;
 }
 EOF
 )" --json
 ```
 
-**Profiler operations:**
+Eval code supports `async`/`await` and receives a `cancellationToken` variable (`System.Threading.CancellationToken`) that is cancelled when the client disconnects.
+
+Use it for cooperative cancellation of long-running operations:
 
 ```bash
-# Get profiler status and memory statistics
-unicli exec Profiler.Inspect --json
-
-# Start profiler recording (clears existing frames by default)
-unicli exec Profiler.StartRecording --json
-unicli exec Profiler.StartRecording '{"deep":true}' --json
-unicli exec Profiler.StartRecording '{"editor":true}' --json
-
-# Stop profiler recording
-unicli exec Profiler.StopRecording --json
-
-# Save profiler data to a .raw file
-unicli exec Profiler.SaveProfile '{"path":"Profiles/capture.raw"}' --json
-
-# Load profiler data from a .raw file
-unicli exec Profiler.LoadProfile '{"path":"Profiles/capture.raw"}' --json
-
-# Get CPU sample data for the last frame (top 20 by default)
-unicli exec Profiler.GetFrameData --json
-unicli exec Profiler.GetFrameData '{"frame":10,"limit":5}' --json
-
-# Take a memory snapshot (.snap file)
-unicli exec Profiler.TakeSnapshot --json
-unicli exec Profiler.TakeSnapshot '{"path":"MemoryCaptures/my_snapshot.snap"}' --json
-
-# Analyze recorded frames (aggregate statistics)
-unicli exec Profiler.AnalyzeFrames --json
-unicli exec Profiler.AnalyzeFrames '{"startFrame":100,"endFrame":200,"topSampleCount":20}' --json
-
-# Find spike frames (frame time or GC threshold)
-unicli exec Profiler.FindSpikes '{"frameTimeThresholdMs":16.6}' --json
-unicli exec Profiler.FindSpikes '{"gcThresholdBytes":1024,"limit":5}' --json
+# Wait asynchronously with cancellation support
+unicli eval 'await Task.Delay(5000, cancellationToken); return "done";' --json
 ```
-
-**Screenshot and video recording:**
-
-```bash
-# Capture a screenshot (requires Play Mode)
-unicli exec Screenshot.Capture --json
-unicli exec Screenshot.Capture '{"path":"Screenshots/test.png"}' --json
-unicli exec Screenshot.Capture '{"path":"Screenshots/hires.png","superSize":2}' --json
-
-# Record video (requires Play Mode and com.unity.recorder)
-unicli exec Recorder.StartRecording --json
-unicli exec Recorder.StartRecording '{"path":"Recordings/demo.mp4","format":"MP4","frameRate":60}' --json
-unicli exec Recorder.Status --json
-unicli exec Recorder.StopRecording --json
-```
-
-**Module management:**
-
-UniCli groups optional commands into **modules** that can be toggled on or off per project. Core commands (Compile, Eval, Console, PlayMode, Menu, Build, TestRunner, Settings, etc.) are always available and cannot be disabled.
-
-The following modules are available:
-
-| Module | Description |
-|---|---|
-| Scene | Scene operations |
-| GameObject | GameObject and Component operations |
-| Assets | AssetDatabase, Prefab, Material operations |
-| Profiler | Profiler operations |
-| Animation | Animator and AnimatorController operations |
-| Remote | Remote debug and Connection operations |
-| Recorder | Video recording operations (requires `com.unity.recorder`) |
-| Search | Unity Search API operations |
-| NuGet | NuGet package management (requires NuGetForUnity) |
-| BuildMagic | BuildMagic build scheme operations (requires `jp.co.cyberagent.buildmagic`) |
-
-All modules are enabled by default. To disable a module, use the CLI or the Unity settings UI (**Edit > Project Settings > UniCli**):
-
-```bash
-# List all modules and their enabled status
-unicli exec Module.List --json
-
-# Enable a module
-unicli exec Module.Enable '{"name":"Search"}' --json
-
-# Disable a module
-unicli exec Module.Disable '{"name":"Profiler"}' --json
-```
-
-Module settings are saved in `ProjectSettings/UniCliSettings.asset`.
-
-`unicli commands --json` includes `builtIn` and `module` fields for each command, so you can programmatically identify whether a command is built-in or user-defined and which module it belongs to.
-
-**NuGet package management (requires [NuGetForUnity](https://github.com/GlitchEnzo/NuGetForUnity)):**
-
-```bash
-# List installed NuGet packages
-unicli exec NuGet.List --json
-
-# Install a NuGet package
-unicli exec NuGet.Install '{"id":"Newtonsoft.Json"}' --json
-unicli exec NuGet.Install '{"id":"Newtonsoft.Json","version":"13.0.3"}' --json
-
-# Install from a local package source
-unicli exec NuGet.Install '{"id":"MyPackage","source":"/path/to/local/feed"}' --json
-
-# Uninstall a NuGet package
-unicli exec NuGet.Uninstall '{"id":"Newtonsoft.Json"}' --json
-
-# Restore all NuGet packages
-unicli exec NuGet.Restore --json
-
-# List configured package sources
-unicli exec NuGet.ListSources --json
-
-# Add a package source
-unicli exec NuGet.AddSource '{"name":"LocalFeed","path":"/path/to/local/feed"}' --json
-
-# Remove a package source
-unicli exec NuGet.RemoveSource '{"name":"LocalFeed"}' --json
-```
-
-
-## Available Commands
-
-The following commands are built in. You can also run `unicli commands` to see this list from the terminal.
-
-| Category           | Command                              | Description                        |
-|--------------------|--------------------------------------|------------------------------------|
-| BuildPlayer        | `BuildPlayer.Build`                  | Build the player                   |
-| BuildPlayer        | `BuildPlayer.Compile`                | Compile player scripts for a build target |
-| BuildProfile       | `BuildProfile.List`                  | List all build profiles (Unity 6+) |
-| BuildProfile       | `BuildProfile.GetActive`             | Get the active build profile (Unity 6+) |
-| BuildProfile       | `BuildProfile.SetActive`             | Set the active build profile (Unity 6+) |
-| BuildProfile       | `BuildProfile.Inspect`               | Inspect a build profile's details (Unity 6+) |
-| BuildTarget        | `BuildTarget.GetActive`              | Get the active build target and target group |
-| BuildTarget        | `BuildTarget.Switch`                 | Switch the active build target       |
-| Core               | `Compile`                            | Compile scripts and return results |
-| Connection         | `Connection.List`                    | List available connection targets  |
-| Connection         | `Connection.Connect`                 | Connect to a target by ID, IP, or device ID |
-| Connection         | `Connection.Status`                  | Get current connection status      |
-| Console            | `Console.GetLog`                     | Get console log entries (supports comma-separated `logType` filter, e.g. `"Warning,Error"`) |
-| Console            | `Console.Clear`                      | Clear console                      |
-| PlayMode           | `PlayMode.Enter`                     | Enter play mode                    |
-| PlayMode           | `PlayMode.Exit`                      | Exit play mode                     |
-| PlayMode           | `PlayMode.Pause`                     | Toggle pause                       |
-| PlayMode           | `PlayMode.Status`                    | Get the current play mode state    |
-| Menu               | `Menu.List`                          | List menu items                    |
-| Menu               | `Menu.Execute`                       | Execute a menu item                |
-| TestRunner         | `TestRunner.RunEditMode`             | Run EditMode tests (`resultFilter`: `"failures"` (default), `"all"`, `"none"`) |
-| TestRunner         | `TestRunner.RunPlayMode`             | Run PlayMode tests (`resultFilter`: `"failures"` (default), `"all"`, `"none"`) |
-| GameObject         | `GameObject.Find`                    | Find GameObjects                   |
-| GameObject         | `GameObject.Create`                  | Create a new GameObject            |
-| GameObject         | `GameObject.CreatePrimitive`         | Create a primitive GameObject      |
-| GameObject         | `GameObject.GetComponents`           | Get components                     |
-| GameObject         | `GameObject.SetActive`               | Set active state                   |
-| GameObject         | `GameObject.GetHierarchy`            | Get scene hierarchy                |
-| GameObject         | `GameObject.AddComponent`            | Add a component                    |
-| GameObject         | `GameObject.RemoveComponent`         | Remove a component                 |
-| GameObject         | `GameObject.Destroy`                 | Destroy a GameObject               |
-| GameObject         | `GameObject.SetTransform`            | Set local transform                |
-| GameObject         | `GameObject.Duplicate`               | Duplicate a GameObject             |
-| GameObject         | `GameObject.Rename`                  | Rename a GameObject                |
-| GameObject         | `GameObject.SetParent`               | Change parent or move to root      |
-| Component          | `Component.SetProperty`              | Set a component property (supports ObjectReference via `guid:`, `instanceId:`, asset path) |
-| Material           | `Material.Create`                    | Create a new material asset        |
-| Material           | `Material.Inspect`                   | Read all properties of a material (auto-generated) |
-| Material           | `Material.SetColor`                  | Set a color property on a material |
-| Material           | `Material.GetColor`                  | Get a color property from a material |
-| Material           | `Material.SetFloat`                  | Set a float property on a material |
-| Material           | `Material.GetFloat`                  | Get a float property from a material |
-| AnimatorController | `AnimatorController.Create`          | Create a new .controller asset     |
-| AnimatorController | `AnimatorController.Inspect`         | Inspect layers, parameters, states |
-| AnimatorController | `AnimatorController.AddParameter`    | Add a parameter                    |
-| AnimatorController | `AnimatorController.RemoveParameter` | Remove a parameter                 |
-| AnimatorController | `AnimatorController.AddState`        | Add a state to a layer             |
-| AnimatorController | `AnimatorController.AddTransition`   | Add a transition between states    |
-| AnimatorController | `AnimatorController.AddTransitionCondition` | Add a condition to a transition |
-| Animator           | `Animator.Inspect`                   | Inspect Animator component         |
-| Animator           | `Animator.SetController`             | Assign an AnimatorController       |
-| Animator           | `Animator.SetParameter`              | Set a parameter value (PlayMode)   |
-| Animator           | `Animator.Play`                      | Play a state immediately (PlayMode)|
-| Animator           | `Animator.CrossFade`                 | Cross-fade to a state (PlayMode)   |
-| Prefab             | `Prefab.GetStatus`                   | Get prefab instance status         |
-| Prefab             | `Prefab.Instantiate`                 | Instantiate a prefab into scene    |
-| Prefab             | `Prefab.Save`                        | Save GameObject as prefab          |
-| Prefab             | `Prefab.Apply`                       | Apply prefab overrides             |
-| Prefab             | `Prefab.Unpack`                      | Unpack a prefab instance           |
-| AssetDatabase      | `AssetDatabase.Find`                 | Search assets                      |
-| AssetDatabase      | `AssetDatabase.Import`               | Import an asset                    |
-| AssetDatabase      | `AssetDatabase.GetPath`              | Get asset path by GUID             |
-| AssetDatabase      | `AssetDatabase.Delete`               | Delete an asset                    |
-| Project            | `Project.Inspect`                    | Get project info                   |
-| PackageManager     | `PackageManager.List`                | List packages                      |
-| PackageManager     | `PackageManager.Add`                 | Add a package                      |
-| PackageManager     | `PackageManager.Remove`              | Remove a package                   |
-| PackageManager     | `PackageManager.Search`              | Search registry                    |
-| PackageManager     | `PackageManager.GetInfo`             | Get package details                |
-| PackageManager     | `PackageManager.Update`              | Update a package                   |
-| AssemblyDefinition | `AssemblyDefinition.List`            | List assembly definitions          |
-| AssemblyDefinition | `AssemblyDefinition.Get`             | Get assembly definition            |
-| AssemblyDefinition | `AssemblyDefinition.Create`          | Create assembly definition         |
-| AssemblyDefinition | `AssemblyDefinition.AddReference`    | Add asmdef reference               |
-| AssemblyDefinition | `AssemblyDefinition.RemoveReference` | Remove asmdef reference            |
-| Scene              | `Scene.List`                         | List all loaded scenes             |
-| Scene              | `Scene.GetActive`                    | Get the active scene               |
-| Scene              | `Scene.SetActive`                    | Set the active scene               |
-| Scene              | `Scene.Open`                         | Open a scene by asset path         |
-| Scene              | `Scene.Close`                        | Close a loaded scene               |
-| Scene              | `Scene.Save`                         | Save a scene or all open scenes    |
-| Scene              | `Scene.New`                          | Create a new scene                 |
-| Selection          | `Selection.Get`                      | Get the current editor selection   |
-| Selection          | `Selection.SetAsset`                 | Select an asset by path            |
-| Selection          | `Selection.SetAssets`                | Select multiple assets by paths    |
-| Selection          | `Selection.SetGameObject`            | Select a GameObject by path        |
-| Selection          | `Selection.SetGameObjects`           | Select multiple GameObjects by paths |
-| Window             | `Window.List`                        | List all available EditorWindow types |
-| Window             | `Window.Open`                        | Open an EditorWindow by type name  |
-| Window             | `Window.Focus`                       | Focus an already-open EditorWindow |
-| Window             | `Window.Create`                      | Create a new EditorWindow instance |
-| Utility            | `Type.List`                          | List types derived from a base type |
-| Utility            | `Type.Inspect`                       | Inspect nested types of a given type |
-| Eval               | `Eval`                               | Compile and execute C# code dynamically |
-| Search (optional)  | `Search`                             | Search Unity project using Unity Search API |
-| NuGet (optional)   | `NuGet.List`                         | List all installed NuGet packages  |
-| NuGet (optional)   | `NuGet.Install`                      | Install a NuGet package            |
-| NuGet (optional)   | `NuGet.Uninstall`                    | Uninstall a NuGet package          |
-| NuGet (optional)   | `NuGet.Restore`                      | Restore all NuGet packages         |
-| NuGet (optional)   | `NuGet.ListSources`                  | List all configured package sources |
-| NuGet (optional)   | `NuGet.AddSource`                    | Add a NuGet package source         |
-| NuGet (optional)   | `NuGet.RemoveSource`                 | Remove a NuGet package source      |
-| Profiler           | `Profiler.Inspect`                   | Get profiler status and memory statistics |
-| Profiler           | `Profiler.StartRecording`            | Start profiler recording           |
-| Profiler           | `Profiler.StopRecording`             | Stop profiler recording            |
-| Profiler           | `Profiler.SaveProfile`               | Save profiler data to a .raw file  |
-| Profiler           | `Profiler.LoadProfile`               | Load profiler data from a .raw file |
-| Profiler           | `Profiler.GetFrameData`              | Get CPU profiler sample data for a specific frame |
-| Profiler           | `Profiler.TakeSnapshot`              | Take a memory snapshot (.snap file) |
-| Profiler           | `Profiler.AnalyzeFrames`             | Analyze recorded frames and return aggregate statistics |
-| Profiler           | `Profiler.FindSpikes`                | Find frames exceeding frame time or GC allocation thresholds |
-| Remote             | `Remote.List`                        | List debug commands on connected player |
-| Remote             | `Remote.Invoke`                      | Invoke a debug command on connected player |
-| Recorder (optional)| `Recorder.StartRecording`            | Start recording Game View as video (requires Play Mode) |
-| Recorder (optional)| `Recorder.StopRecording`             | Stop the current video recording   |
-| Recorder (optional)| `Recorder.Status`                    | Get the current recording status   |
-| Screenshot         | `Screenshot.Capture`                 | Capture Game View screenshot as PNG (requires Play Mode) |
-| BuildMagic (optional)| `BuildMagic.List`                  | List all BuildMagic build schemes  |
-| BuildMagic (optional)| `BuildMagic.Inspect`               | Inspect a build scheme's configurations |
-| BuildMagic (optional)| `BuildMagic.Apply`                 | Apply a build scheme               |
-| Module             | `Module.List`                        | List all available modules and their enabled status |
-| Module             | `Module.Enable`                      | Enable a module and reload the command dispatcher |
-| Module             | `Module.Disable`                     | Disable a module and reload the command dispatcher |
-
-Use `unicli exec <command> --help` to see parameters for any command.
-
-### Settings Commands (auto-generated)
-
-UniCli auto-generates Inspect commands via a Roslyn Source Generator at Unity compile time. Target types are declared with the `[GenerateCommands]` assembly attribute, so the available properties always match your exact Unity version.
-
-| Type | Command | Description |
-|---|---|---|
-| `PlayerSettings` | `PlayerSettings.Inspect` | Get all PlayerSettings values |
-| `EditorSettings` | `EditorSettings.Inspect` | Get all EditorSettings values |
-| `EditorUserBuildSettings` | `EditorUserBuildSettings.Inspect` | Get all EditorUserBuildSettings values |
-| `Material` | `Material.Inspect` | Read all properties of a material instance (requires `guid`) |
-
-To **modify** settings, use `unicli eval` for direct access to Unity APIs:
-
-```bash
-# Set a property
-unicli eval 'PlayerSettings.companyName = "MyCompany";' --json
-
-# Call a method with platform target
-unicli eval 'PlayerSettings.SetScriptingBackend(UnityEditor.Build.NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);' --json
-
-# Read a value
-unicli eval 'return PlayerSettings.companyName;' --json
-```
-
-For Material operations, use the dedicated commands (`Material.SetColor`, `Material.SetFloat`, etc.) or `unicli eval`.
-
-Run `unicli commands` to see the full list of available commands, including all generated commands.
 
 
 ## Custom Commands
@@ -756,6 +350,16 @@ protected override bool TryWriteFormatted(GreetResponse response, bool success, 
 }
 ```
 
+With this override, the output changes depending on whether `--json` is used:
+
+```bash
+$ unicli exec MyApp.Greet --name "World"
+Hello, World!
+
+$ unicli exec MyApp.Greet --name "World" --json
+{"message":"Hello, World!"}
+```
+
 ### Async handlers and cancellation
 
 All command handlers receive a `CancellationToken` that is cancelled when the client disconnects (e.g., Ctrl+C). For long-running async operations, pass the token through to ensure prompt cancellation:
@@ -798,6 +402,314 @@ Throw `CommandFailedException` to report failures while still returning structur
 if (hasErrors)
     throw new CommandFailedException("Validation failed", response);
 ```
+
+
+## Built-in Commands
+
+The following commands are built in. Run `unicli commands` to see this list from the terminal, or `unicli exec <command> --help` to see parameters for any command.
+
+### Core
+
+| Command | Description |
+|---|---|
+| `Compile` | Compile scripts and return results |
+| `Eval` | Compile and execute C# code dynamically |
+
+### Console
+
+| Command | Description |
+|---|---|
+| `Console.GetLog` | Get console log entries (supports comma-separated `logType` filter, e.g. `"Warning,Error"`) |
+| `Console.Clear` | Clear console |
+
+### PlayMode
+
+| Command | Description |
+|---|---|
+| `PlayMode.Enter` | Enter play mode |
+| `PlayMode.Exit` | Exit play mode |
+| `PlayMode.Pause` | Toggle pause |
+| `PlayMode.Status` | Get the current play mode state |
+
+### TestRunner
+
+| Command | Description |
+|---|---|
+| `TestRunner.RunEditMode` | Run EditMode tests (`resultFilter`: `"failures"` (default), `"all"`, `"none"`) |
+| `TestRunner.RunPlayMode` | Run PlayMode tests (`resultFilter`: `"failures"` (default), `"all"`, `"none"`) |
+
+### Build
+
+| Command | Description |
+|---|---|
+| `BuildPlayer.Build` | Build the player |
+| `BuildPlayer.Compile` | Compile player scripts for a build target |
+| `BuildTarget.GetActive` | Get the active build target and target group |
+| `BuildTarget.Switch` | Switch the active build target |
+| `BuildProfile.List` | List all build profiles (Unity 6+) |
+| `BuildProfile.GetActive` | Get the active build profile (Unity 6+) |
+| `BuildProfile.SetActive` | Set the active build profile (Unity 6+) |
+| `BuildProfile.Inspect` | Inspect a build profile's details (Unity 6+) |
+
+### GameObject / Component
+
+| Command | Description |
+|---|---|
+| `GameObject.Find` | Find GameObjects |
+| `GameObject.Create` | Create a new GameObject |
+| `GameObject.CreatePrimitive` | Create a primitive GameObject |
+| `GameObject.GetComponents` | Get components |
+| `GameObject.SetActive` | Set active state |
+| `GameObject.GetHierarchy` | Get scene hierarchy |
+| `GameObject.AddComponent` | Add a component |
+| `GameObject.RemoveComponent` | Remove a component |
+| `GameObject.Destroy` | Destroy a GameObject |
+| `GameObject.SetTransform` | Set local transform |
+| `GameObject.Duplicate` | Duplicate a GameObject |
+| `GameObject.Rename` | Rename a GameObject |
+| `GameObject.SetParent` | Change parent or move to root |
+| `Component.SetProperty` | Set a component property (supports ObjectReference via `guid:`, `instanceId:`, asset path) |
+
+### Scene
+
+| Command | Description |
+|---|---|
+| `Scene.List` | List all loaded scenes |
+| `Scene.GetActive` | Get the active scene |
+| `Scene.SetActive` | Set the active scene |
+| `Scene.Open` | Open a scene by asset path |
+| `Scene.Close` | Close a loaded scene |
+| `Scene.Save` | Save a scene or all open scenes |
+| `Scene.New` | Create a new scene |
+
+### Asset
+
+| Command | Description |
+|---|---|
+| `AssetDatabase.Find` | Search assets |
+| `AssetDatabase.Import` | Import an asset |
+| `AssetDatabase.GetPath` | Get asset path by GUID |
+| `AssetDatabase.Delete` | Delete an asset |
+| `Prefab.GetStatus` | Get prefab instance status |
+| `Prefab.Instantiate` | Instantiate a prefab into scene |
+| `Prefab.Save` | Save GameObject as prefab |
+| `Prefab.Apply` | Apply prefab overrides |
+| `Prefab.Unpack` | Unpack a prefab instance |
+| `Material.Create` | Create a new material asset |
+| `Material.Inspect` | Read all properties of a material (auto-generated) |
+| `Material.SetColor` | Set a color property on a material |
+| `Material.GetColor` | Get a color property from a material |
+| `Material.SetFloat` | Set a float property on a material |
+| `Material.GetFloat` | Get a float property from a material |
+
+### Animation
+
+| Command | Description |
+|---|---|
+| `AnimatorController.Create` | Create a new .controller asset |
+| `AnimatorController.Inspect` | Inspect layers, parameters, states |
+| `AnimatorController.AddParameter` | Add a parameter |
+| `AnimatorController.RemoveParameter` | Remove a parameter |
+| `AnimatorController.AddState` | Add a state to a layer |
+| `AnimatorController.AddTransition` | Add a transition between states |
+| `AnimatorController.AddTransitionCondition` | Add a condition to a transition |
+| `Animator.Inspect` | Inspect Animator component |
+| `Animator.SetController` | Assign an AnimatorController |
+| `Animator.SetParameter` | Set a parameter value (PlayMode) |
+| `Animator.Play` | Play a state immediately (PlayMode) |
+| `Animator.CrossFade` | Cross-fade to a state (PlayMode) |
+
+### PackageManager
+
+| Command | Description |
+|---|---|
+| `PackageManager.List` | List packages |
+| `PackageManager.Add` | Add a package |
+| `PackageManager.Remove` | Remove a package |
+| `PackageManager.Search` | Search registry |
+| `PackageManager.GetInfo` | Get package details |
+| `PackageManager.Update` | Update a package |
+
+### Project / Settings
+
+| Command | Description |
+|---|---|
+| `Project.Inspect` | Get project info |
+| `PlayerSettings.Inspect` | Get all PlayerSettings values (auto-generated) |
+| `EditorSettings.Inspect` | Get all EditorSettings values (auto-generated) |
+| `EditorUserBuildSettings.Inspect` | Get all EditorUserBuildSettings values (auto-generated) |
+
+### AssemblyDefinition
+
+| Command | Description |
+|---|---|
+| `AssemblyDefinition.List` | List assembly definitions |
+| `AssemblyDefinition.Get` | Get assembly definition |
+| `AssemblyDefinition.Create` | Create assembly definition |
+| `AssemblyDefinition.AddReference` | Add asmdef reference |
+| `AssemblyDefinition.RemoveReference` | Remove asmdef reference |
+
+### Selection / Window / Menu
+
+| Command | Description |
+|---|---|
+| `Selection.Get` | Get the current editor selection |
+| `Selection.SetAsset` | Select an asset by path |
+| `Selection.SetAssets` | Select multiple assets by paths |
+| `Selection.SetGameObject` | Select a GameObject by path |
+| `Selection.SetGameObjects` | Select multiple GameObjects by paths |
+| `Window.List` | List all available EditorWindow types |
+| `Window.Open` | Open an EditorWindow by type name |
+| `Window.Focus` | Focus an already-open EditorWindow |
+| `Window.Create` | Create a new EditorWindow instance |
+| `Menu.List` | List menu items |
+| `Menu.Execute` | Execute a menu item |
+
+### Utility
+
+| Command | Description |
+|---|---|
+| `Type.List` | List types derived from a base type |
+| `Type.Inspect` | Inspect nested types of a given type |
+
+### Connection / Remote
+
+| Command | Description |
+|---|---|
+| `Connection.List` | List available connection targets |
+| `Connection.Connect` | Connect to a target by ID, IP, or device ID |
+| `Connection.Status` | Get current connection status |
+| `Remote.List` | List debug commands on connected player |
+| `Remote.Invoke` | Invoke a debug command on connected player |
+
+### Profiler
+
+| Command | Description |
+|---|---|
+| `Profiler.Inspect` | Get profiler status and memory statistics |
+| `Profiler.StartRecording` | Start profiler recording |
+| `Profiler.StopRecording` | Stop profiler recording |
+| `Profiler.SaveProfile` | Save profiler data to a .raw file |
+| `Profiler.LoadProfile` | Load profiler data from a .raw file |
+| `Profiler.GetFrameData` | Get CPU profiler sample data for a specific frame |
+| `Profiler.TakeSnapshot` | Take a memory snapshot (.snap file) |
+| `Profiler.AnalyzeFrames` | Analyze recorded frames and return aggregate statistics |
+| `Profiler.FindSpikes` | Find frames exceeding frame time or GC allocation thresholds |
+
+### Screenshot / Recorder
+
+| Command | Description |
+|---|---|
+| `Screenshot.Capture` | Capture Game View screenshot as PNG (requires Play Mode) |
+| `Recorder.StartRecording` | Start recording Game View as video (requires Play Mode) |
+| `Recorder.StopRecording` | Stop the current video recording |
+| `Recorder.Status` | Get the current recording status |
+
+### Module
+
+| Command | Description |
+|---|---|
+| `Module.List` | List all available modules and their enabled status |
+| `Module.Enable` | Enable a module and reload the command dispatcher |
+| `Module.Disable` | Disable a module and reload the command dispatcher |
+
+### Optional: Search
+
+| Command | Description |
+|---|---|
+| `Search` | Search Unity project using Unity Search API |
+
+### Optional: NuGet
+
+Requires [NuGetForUnity](https://github.com/GlitchEnzo/NuGetForUnity).
+
+| Command | Description |
+|---|---|
+| `NuGet.List` | List all installed NuGet packages |
+| `NuGet.Install` | Install a NuGet package |
+| `NuGet.Uninstall` | Uninstall a NuGet package |
+| `NuGet.Restore` | Restore all NuGet packages |
+| `NuGet.ListSources` | List all configured package sources |
+| `NuGet.AddSource` | Add a NuGet package source |
+| `NuGet.RemoveSource` | Remove a NuGet package source |
+
+### Optional: BuildMagic
+
+Requires [BuildMagic](https://github.com/AnnulusGames/BuildMagic) (`jp.co.cyberagent.buildmagic`).
+
+| Command | Description |
+|---|---|
+| `BuildMagic.List` | List all BuildMagic build schemes |
+| `BuildMagic.Inspect` | Inspect a build scheme's configurations |
+| `BuildMagic.Apply` | Apply a build scheme |
+
+Settings Inspect commands (`PlayerSettings.Inspect`, `EditorSettings.Inspect`, etc.) are auto-generated via a Roslyn Source Generator, so the available properties always match your exact Unity version. To **modify** settings, use `unicli eval`:
+
+```bash
+unicli eval 'PlayerSettings.companyName = "MyCompany";' --json
+```
+
+
+## Module Management
+
+UniCli groups optional commands into **modules** that can be toggled on or off per project. Core commands (Compile, Eval, Console, PlayMode, Menu, Build, TestRunner, Settings, etc.) are always available and cannot be disabled.
+
+The following modules are available:
+
+| Module | Description |
+|---|---|
+| Scene | Scene operations |
+| GameObject | GameObject and Component operations |
+| Assets | AssetDatabase, Prefab, Material operations |
+| Profiler | Profiler operations |
+| Animation | Animator and AnimatorController operations |
+| Remote | Remote debug and Connection operations |
+| Recorder | Video recording operations (requires `com.unity.recorder`) |
+| Search | Unity Search API operations |
+| NuGet | NuGet package management (requires NuGetForUnity) |
+| BuildMagic | BuildMagic build scheme operations (requires `jp.co.cyberagent.buildmagic`) |
+
+All modules are enabled by default. To disable a module, use the CLI or the Unity settings UI (**Edit > Project Settings > UniCli**):
+
+```bash
+# List all modules and their enabled status
+unicli exec Module.List --json
+
+# Enable a module
+unicli exec Module.Enable '{"name":"Search"}' --json
+
+# Disable a module
+unicli exec Module.Disable '{"name":"Profiler"}' --json
+```
+
+Module settings are saved in `ProjectSettings/UniCliSettings.asset`.
+
+`unicli commands --json` includes `builtIn` and `module` fields for each command, so you can programmatically identify whether a command is built-in or user-defined and which module it belongs to.
+
+
+## Architecture
+
+UniCli consists of two components:
+
+- **CLI** (`unicli`) — A NativeAOT-compiled binary that you run from the terminal
+- **Unity Package** (`com.yucchiy.unicli-server`) — An Editor plugin that receives and executes commands inside Unity
+
+### Architecture
+
+```
+┌──────────┐  Named Pipe     ┌────────────────┐  PlayerConnection  ┌────────────────┐
+│  unicli  │◄───────────────►│  Unity Editor  │◄──────────────────►│     Device     │
+│  (CLI)   │ Length-prefixed │  (Server)      │ Chunked messages   │  (Dev Build)   │
+│          │ JSON messages   │                │                    │                │
+└──────────┘                 └────────────────┘                    └────────────────┘
+```
+
+**CLI ↔ Editor (Named Pipe):**
+The CLI and Unity Editor communicate over a named pipe. The pipe name is derived from a SHA256 hash of the project's `Assets` path, so each project gets its own connection. Messages use a length-prefixed JSON framing protocol with a handshake (magic bytes `UCLI` + protocol version). The server plugin initializes via `[InitializeOnLoad]`, creates a background listener on the named pipe, and enqueues incoming commands to a `ConcurrentQueue`. Commands are dequeued and executed on Unity's main thread every frame via `EditorApplication.update`.
+
+**Editor ↔ Device (PlayerConnection):**
+For remote debugging, the Editor relays commands to a running Development Build via Unity's `PlayerConnection`. The runtime module (`UniCli.Remote`) auto-initializes a `RuntimeDebugReceiver` on the device, which discovers debug commands via reflection and registers message handlers. Responses are split into 16 KB chunks to work around PlayerConnection's undocumented message size limits. The Editor's `RemoteBridge` reassembles chunks and returns the complete response to the CLI.
+
 
 ## Remote Commands
 
@@ -905,7 +817,9 @@ Key points:
 - Place custom commands anywhere in your project — they are discovered automatically via reflection at startup
 
 
-## Claude Code Integration
+## AI Agent Integration
+
+### Claude Code Plugin
 
 UniCli provides a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin via the marketplace. This plugin gives Claude Code the ability to interact with Unity Editor — compiling scripts, running tests, inspecting GameObjects, managing packages, and more — as part of its coding workflow.
 
@@ -919,9 +833,9 @@ With the plugin installed, Claude Code can:
 
 The plugin also handles server package setup: if the `com.yucchiy.unicli-server` package is not yet installed in the Unity project, Claude Code will run `unicli install` to set it up automatically.
 
-### Install the plugin
+#### Install the plugin
 
-The UniCli CLI must be installed beforehand. See [Installation — CLI](#cli) above.
+The UniCli CLI must be installed beforehand. See [Getting Started — CLI](#cli) above.
 
 ```bash
 # 1. Add the UniCli marketplace
@@ -931,7 +845,7 @@ The UniCli CLI must be installed beforehand. See [Installation — CLI](#cli) ab
 /plugin install unicli@unicli
 ```
 
-## Agent Skills / Codex Integration
+### Agent Skills / Codex
 
 UniCli's skill definition follows the [Agent Skills](https://github.com/anthropics/agent-skills) specification, making it compatible with multiple AI coding agents:
 
@@ -939,7 +853,7 @@ UniCli's skill definition follows the [Agent Skills](https://github.com/anthropi
 - **Claude Code**: Installed as a plugin via `.claude-plugin/`
 - **Other agents**: Any tool that supports the Agent Skills spec can load the skill from `.agents/skills/`
 
-### Install via Codex `$skill-installer`
+#### Install via Codex `$skill-installer`
 
 If you're using [Codex](https://openai.com/index/introducing-codex/), install the UniCli skill directly from this repository:
 
@@ -949,7 +863,7 @@ $skill-installer install https://github.com/yucchiy/UniCli/tree/main/.agents/ski
 
 Once installed, Codex automatically detects the skill and gains the ability to interact with Unity Editor.
 
-### Manual setup for other projects
+#### Manual setup for other projects
 
 To use UniCli's skill in another project, symlink or copy the skill directory:
 
