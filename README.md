@@ -872,6 +872,8 @@ UniCli's skill definition follows the [Agent Skills](https://github.com/anthropi
 - **Claude Code**: Installed as a plugin via `.claude-plugin/`
 - **Other agents**: Any tool that supports the Agent Skills spec can load the skill from `.agents/skills/`
 
+Codex-specific UI metadata (`agents/openai.yaml`) is bundled in the `.agents/skills/unity-development/` copy.
+
 #### Install via Codex `$skill-installer`
 
 If you're using [Codex](https://openai.com/index/introducing-codex/), install the UniCli skill directly from this repository:
