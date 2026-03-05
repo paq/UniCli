@@ -10,12 +10,10 @@ namespace UniCli.Remote
     public sealed class DebugCommandRegistry
     {
         private readonly Dictionary<string, DebugCommand> _commands = new();
-        private readonly Dictionary<string, DebugCommandAttribute> _attributes = new();
 
         public void DiscoverCommands()
         {
             _commands.Clear();
-            _attributes.Clear();
 
             var assemblies = AppDomain.CurrentDomain.GetAssemblies();
             foreach (var assembly in assemblies)
@@ -38,24 +36,18 @@ namespace UniCli.Remote
                     if (!typeof(DebugCommand).IsAssignableFrom(type))
                         continue;
 
-                    var attr = type.GetCustomAttribute<DebugCommandAttribute>();
-                    if (attr == null)
-                        continue;
-
                     try
                     {
                         var instance = (DebugCommand)Activator.CreateInstance(type);
-                        if (!_commands.TryAdd(attr.Name, instance))
+                        if (!_commands.TryAdd(instance.CommandName, instance))
                         {
-                            UnityEngine.Debug.LogWarning($"[UniCli.Remote] Duplicate debug command '{attr.Name}', skipping {type.FullName}");
+                            UnityEngine.Debug.LogWarning($"[UniCli.Remote] Duplicate debug command '{instance.CommandName}', skipping {type.FullName}");
                             continue;
                         }
-
-                        _attributes[attr.Name] = attr;
                     }
                     catch (Exception ex)
                     {
-                        UnityEngine.Debug.LogWarning($"[UniCli.Remote] Failed to create debug command '{attr.Name}' ({type.FullName}): {ex.Message}");
+                        UnityEngine.Debug.LogWarning($"[UniCli.Remote] Failed to create debug command ({type.FullName}): {ex.Message}");
                     }
                 }
             }
@@ -71,11 +63,11 @@ namespace UniCli.Remote
         public RuntimeCommandInfo[] GetCommandInfos()
         {
             var infos = new List<RuntimeCommandInfo>(_commands.Count);
-            foreach (var kvp in _attributes)
+            foreach (var kvp in _commands)
             {
                 infos.Add(new RuntimeCommandInfo
                 {
-                    name = kvp.Value.Name,
+                    name = kvp.Value.CommandName,
                     description = kvp.Value.Description
                 });
             }
