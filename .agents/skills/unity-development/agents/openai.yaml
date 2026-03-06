@@ -1,6 +1,7 @@
 interface:
   display_name: "UniCli — Unity Editor CLI"
   short_description: "Control Unity Editor from the terminal via UniCli CLI"
+  default_prompt: "Use $unity-development to compile Unity scripts and run tests via UniCli."
 
 policy:
   allow_implicit_invocation: true

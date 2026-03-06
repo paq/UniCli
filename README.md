@@ -868,7 +868,7 @@ The UniCli CLI must be installed beforehand. See [Getting Started — CLI](#cli)
 
 UniCli's skill definition follows the [Agent Skills](https://github.com/anthropics/agent-skills) specification, making it compatible with multiple AI coding agents:
 
-- **Codex (OpenAI)**: Automatically detected via `.agents/skills/unity-development/` (symlinked to the canonical skill definition)
+- **Codex (OpenAI)**: Automatically detected via `.agents/skills/unity-development/`
 - **Claude Code**: Installed as a plugin via `.claude-plugin/`
 - **Other agents**: Any tool that supports the Agent Skills spec can load the skill from `.agents/skills/`
 
@@ -884,11 +884,11 @@ Once installed, Codex automatically detects the skill and gains the ability to i
 
 #### Manual setup for other projects
 
-To use UniCli's skill in another project, symlink or copy the skill directory:
+To use UniCli's skill in another project, copy the skill directory:
 
 ```bash
 mkdir -p .agents/skills
-ln -s /path/to/UniCli/.claude-plugin/unicli/skills/unity-development .agents/skills/unity-development
+cp -R /path/to/UniCli/.agents/skills/unity-development .agents/skills/unity-development
 ```
 
 ## License
