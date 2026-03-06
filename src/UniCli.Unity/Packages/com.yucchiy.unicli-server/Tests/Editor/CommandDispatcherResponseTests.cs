@@ -5,6 +5,7 @@ using NUnit.Framework;
 using UniCli.Protocol;
 using UniCli.Server.Editor.Handlers;
 using UniCli.Server.Editor.Internal;
+using UnityEditor;
 using UnityEngine;
 
 namespace UniCli.Server.Editor.Tests
@@ -40,6 +41,22 @@ namespace UniCli.Server.Editor.Tests
             }
         }
 
+        private static ServiceRegistry CreateServiceRegistry()
+        {
+            var services = new ServiceRegistry();
+            var installerTypes = TypeCache.GetTypesDerivedFrom<IServiceInstaller>();
+            foreach (var type in installerTypes)
+            {
+                if (type.IsAbstract || type.IsInterface)
+                    continue;
+
+                var installer = (IServiceInstaller)Activator.CreateInstance(type);
+                installer.Install(services);
+            }
+
+            return services;
+        }
+
         [Test]
         public void MakeResponse_Success_SetsFieldsCorrectly()
         {
@@ -63,7 +80,7 @@ namespace UniCli.Server.Editor.Tests
         [Test]
         public void BuildResponse_UnitData_ReturnsEmptyData()
         {
-            var dispatcher = new CommandDispatcher(new ServiceRegistry());
+            var dispatcher = new CommandDispatcher(CreateServiceRegistry());
             var handler = new StubHandler();
             var response = dispatcher.BuildResponse(true, "ok", Unit.Value, handler, false);
             Assert.IsTrue(response.success);
@@ -73,7 +90,7 @@ namespace UniCli.Server.Editor.Tests
         [Test]
         public void BuildResponse_NullData_ReturnsEmptyData()
         {
-            var dispatcher = new CommandDispatcher(new ServiceRegistry());
+            var dispatcher = new CommandDispatcher(CreateServiceRegistry());
             var handler = new StubHandler();
             var response = dispatcher.BuildResponse(true, "ok", null, handler, false);
             Assert.IsTrue(response.success);
@@ -83,7 +100,7 @@ namespace UniCli.Server.Editor.Tests
         [Test]
         public void BuildResponse_JsonMode_ReturnsJsonData()
         {
-            var dispatcher = new CommandDispatcher(new ServiceRegistry());
+            var dispatcher = new CommandDispatcher(CreateServiceRegistry());
             var handler = new StubHandler();
             var data = new TestResponse { value = "hello" };
             var response = dispatcher.BuildResponse(true, "ok", data, handler, false);
@@ -94,7 +111,7 @@ namespace UniCli.Server.Editor.Tests
         [Test]
         public void BuildResponse_TextMode_WithFormatter_ReturnsTextData()
         {
-            var dispatcher = new CommandDispatcher(new ServiceRegistry());
+            var dispatcher = new CommandDispatcher(CreateServiceRegistry());
             var handler = new StubFormatterHandler();
             var data = new TestResponse { value = "world" };
             var response = dispatcher.BuildResponse(true, "ok", data, handler, true);
@@ -105,7 +122,7 @@ namespace UniCli.Server.Editor.Tests
         [Test]
         public void BuildResponse_TextMode_WithoutFormatter_FallsBackToJson()
         {
-            var dispatcher = new CommandDispatcher(new ServiceRegistry());
+            var dispatcher = new CommandDispatcher(CreateServiceRegistry());
             var handler = new StubHandler();
             var data = new TestResponse { value = "fallback" };
             var response = dispatcher.BuildResponse(true, "ok", data, handler, true);
