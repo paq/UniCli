@@ -60,10 +60,6 @@ namespace UniCli.Server.Editor
         {
             RunServiceInstallers(Services);
 
-            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
-            EditorApplication.update += OnEditorUpdate;
-            EditorApplication.quitting += OnEditorQuitting;
-
             StartServer();
         }
 
@@ -83,6 +79,12 @@ namespace UniCli.Server.Editor
                 logger: UniCliEditorLog.Log,
                 errorLogger: UniCliEditorLog.LogError
             );
+
+            EditorApplication.update += OnEditorUpdate;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+            EditorApplication.quitting += OnEditorQuitting;
+
+            EnsurePidFile();
         }
 
         public static void ReloadDispatcher()
@@ -101,9 +103,15 @@ namespace UniCli.Server.Editor
                 return;
 
             Application.runInBackground = _originalRunInBackground;
+            EditorApplication.update -= OnEditorUpdate;
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            EditorApplication.quitting -= OnEditorQuitting;
+
             _server.Dispose();
             _server = null;
             _dispatcher = null;
+
+            DeletePidFile();
         }
 
         private static string GetPidFilePath()
