@@ -41,24 +41,19 @@ public class CreateStartInfoTests
 
 public class TryGetMacOSAppBundlePathTests
 {
-    [Fact]
+    [SkippableFact]
     public void UnityBinaryInsideAppBundle_ReturnsBundlePath()
     {
-        var editorPath = "/Applications/Unity/Hub/Editor/6000.0.0f1/Unity.app/Contents/MacOS/Unity";
-
-        var result = UnityLauncher.TryGetMacOSAppBundlePath(editorPath);
-
-        Assert.Equal("/Applications/Unity/Hub/Editor/6000.0.0f1/Unity.app", result);
+        Skip.IfNot(RuntimeInformation.IsOSPlatform(OSPlatform.OSX));
+        Assert.Equal("/Applications/Unity/Hub/Editor/6000.0.0f1/Unity.app",
+            UnityLauncher.TryGetMacOSAppBundlePath("/Applications/Unity/Hub/Editor/6000.0.0f1/Unity.app/Contents/MacOS/Unity"));
     }
 
-    [Fact]
+    [SkippableFact]
     public void NonBundlePath_ReturnsNull()
     {
-        var editorPath = "/opt/unity/Editor/Unity";
-
-        var result = UnityLauncher.TryGetMacOSAppBundlePath(editorPath);
-
-        Assert.Null(result);
+        Skip.IfNot(RuntimeInformation.IsOSPlatform(OSPlatform.OSX));
+        Assert.Null(UnityLauncher.TryGetMacOSAppBundlePath("/opt/unity/Editor/Unity"));
     }
 }
 
