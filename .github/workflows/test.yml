@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+
+jobs:
+  test-client:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Setup dependencies
+        run: |
+          dotnet restore src/UniCli.Protocol
+          dotnet restore src/UniCli.Client.Tests
+          dotnet build src/UniCli.Protocol --no-restore
+      - name: Run tests
+        working-directory: src/UniCli.Client.Tests
+        run: dotnet test --no-restore
