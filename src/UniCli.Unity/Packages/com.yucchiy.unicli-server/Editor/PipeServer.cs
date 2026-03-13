@@ -1,7 +1,9 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +23,14 @@ namespace UniCli.Server.Editor
         private readonly TaskCompletionSource<bool> _shutdownTcs = new();
         private readonly Task _serverLoop;
 
+        private readonly object _activeClientsLock = new();
+        private readonly HashSet<Task> _activeClientTasks = new();
+
+        private readonly object _acceptingServerLock = new();
+        private NamedPipeServerStream _acceptingServer;
+
+        private int _disposed;
+
         public PipeServer(
             string pipeName,
             Action<CommandRequest, CancellationToken, Action<CommandResponse>> onCommandReceived)
@@ -31,10 +41,10 @@ namespace UniCli.Server.Editor
             _serverLoop = Task.Run(async () => await RunLoopAsync(_cts.Token));
         }
 
-        public Task WaitForShutdownAsync(CancellationToken cancellationToken = default)
+        public async Task WaitForShutdownAsync(CancellationToken cancellationToken = default)
         {
             using var registration = cancellationToken.Register(() => _shutdownTcs.TrySetCanceled());
-            return _shutdownTcs.Task;
+            await _shutdownTcs.Task;
         }
 
         private async Task RunLoopAsync(CancellationToken cancellationToken)
@@ -66,10 +76,21 @@ namespace UniCli.Server.Editor
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous);
 
-            await server.WaitForConnectionAsync(cancellationToken);
+            lock (_acceptingServerLock)
+                _acceptingServer = server;
 
-            // Fire-and-forget: HandleClientAsync owns the server stream and will dispose it
-            _ = HandleClientAsync(server, cancellationToken);
+            try
+            {
+                await server.WaitForConnectionAsync(cancellationToken);
+            }
+            finally
+            {
+                lock (_acceptingServerLock)
+                    _acceptingServer = null;
+            }
+
+            var clientTask = HandleClientAsync(server, cancellationToken);
+            TrackClientTask(clientTask);
         }
 
         private async Task HandleClientAsync(NamedPipeServerStream server, CancellationToken cancellationToken)
@@ -90,6 +111,10 @@ namespace UniCli.Server.Editor
                         if (!await ProcessCommandAsync(server, request, cancellationToken))
                             break;
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected during shutdown
                 }
                 catch (Exception ex)
                 {
@@ -141,7 +166,12 @@ namespace UniCli.Server.Editor
         private async Task<bool> ProcessCommandAsync(
             NamedPipeServerStream server, CommandRequest request, CancellationToken cancellationToken)
         {
-            using var commandCts = new CancellationTokenSource();
+            // Do NOT use 'using' here. The linked CTS must stay alive until all I/O
+            // completion callbacks referencing its token have finished. Disposing it
+            // while a native pipe I/O callback is in-flight causes
+            // ObjectDisposedException on the ThreadPool I/O thread, which can crash
+            // the Mono runtime during domain reload.
+            var commandCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             try
             {
                 var responseTcs = new TaskCompletionSource<CommandResponse>();
@@ -155,10 +185,15 @@ namespace UniCli.Server.Editor
                 if (!responseTcs.Task.IsCompleted)
                 {
                     commandCts.Cancel();
+                    // Wait for monitor to finish so its I/O callback completes
+                    // before we leave this scope.
+                    try { await monitorTask; } catch { /* expected */ }
                     return false;
                 }
 
                 commandCts.Cancel();
+                // Wait for monitor to finish so its I/O callback completes.
+                try { await monitorTask; } catch { /* expected */ }
                 var commandResponse = await responseTcs.Task;
 
                 await WriteResponseAsync(server, commandResponse, cancellationToken);
@@ -259,10 +294,62 @@ namespace UniCli.Server.Editor
             catch (Exception) { commandCts.Cancel(); }
         }
 
+        private void TrackClientTask(Task task)
+        {
+            lock (_activeClientsLock)
+                _activeClientTasks.Add(task);
+
+            task.ContinueWith(_ =>
+            {
+                lock (_activeClientsLock)
+                    _activeClientTasks.Remove(task);
+            }, TaskContinuationOptions.ExecuteSynchronously);
+        }
+
+        private Task[] GetActiveClientTasks()
+        {
+            lock (_activeClientsLock)
+                return _activeClientTasks.ToArray();
+        }
+
+        private void DisposeAcceptingServer()
+        {
+            lock (_acceptingServerLock)
+            {
+                try
+                {
+                    _acceptingServer?.Dispose();
+                }
+                catch
+                {
+                    // Disposing the accepting server to unblock WaitForConnectionAsync
+                }
+                _acceptingServer = null;
+            }
+        }
+
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
             _cts.Cancel();
-            _serverLoop?.Wait(TimeSpan.FromMilliseconds(500));
+            DisposeAcceptingServer();
+
+            var tasks = GetActiveClientTasks();
+            var allTasks = new Task[tasks.Length + 1];
+            allTasks[0] = _serverLoop;
+            Array.Copy(tasks, 0, allTasks, 1, tasks.Length);
+
+            try
+            {
+                Task.WaitAll(allTasks, TimeSpan.FromMilliseconds(2000));
+            }
+            catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException))
+            {
+                // Expected during shutdown
+            }
+
             _cts.Dispose();
         }
     }

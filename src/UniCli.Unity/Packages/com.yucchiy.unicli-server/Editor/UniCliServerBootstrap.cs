@@ -194,6 +194,7 @@ namespace UniCli.Server.Editor
 
         private static void OnEditorQuitting()
         {
+            StopServer();
             DeletePidFile();
         }
 

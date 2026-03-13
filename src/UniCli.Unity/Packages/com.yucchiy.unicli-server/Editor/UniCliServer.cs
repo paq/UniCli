@@ -22,6 +22,10 @@ namespace UniCli.Server.Editor
         private readonly Action<string> _errorLogger;
         private readonly Task _serverLoop;
         private Task? _currentCommand;
+        private CancellationTokenSource? _currentCommandCts;
+
+        private readonly object _pipeServerLock = new();
+        private PipeServer? _currentPipeServer;
 
         public string? CurrentCommandName { get; private set; }
         public DateTime? CurrentCommandStartTime { get; private set; }
@@ -49,7 +53,30 @@ namespace UniCli.Server.Editor
         private void Stop()
         {
             _cts.Cancel();
-            _serverLoop.Wait(TimeSpan.FromMilliseconds(500));
+            _currentCommandCts?.Cancel();
+
+            // Directly dispose the PipeServer to ensure all ThreadPool tasks are stopped
+            // before domain reload proceeds. This is critical because the indirect disposal
+            // via the using block in RunServerLoopAsync may not complete in time.
+            PipeServer? pipeServer;
+            lock (_pipeServerLock)
+            {
+                pipeServer = _currentPipeServer;
+                _currentPipeServer = null;
+            }
+            pipeServer?.Dispose();
+
+            try
+            {
+                var tasks = _currentCommand is { IsCompleted: false }
+                    ? new[] { _serverLoop, _currentCommand }
+                    : new[] { _serverLoop };
+                Task.WaitAll(tasks, TimeSpan.FromMilliseconds(3000));
+            }
+            catch (AggregateException)
+            {
+                // Expected during shutdown (OperationCanceledException etc.)
+            }
         }
 
         public void ReplaceDispatcher(CommandDispatcher dispatcher)
@@ -62,14 +89,18 @@ namespace UniCli.Server.Editor
             if (_currentCommand is { IsCompleted: false })
                 return;
 
+            _currentCommandCts?.Dispose();
+            _currentCommandCts = null;
             _currentCommand = null;
 
             if (_commandQueue.TryDequeue(out var item))
             {
                 var (request, cancellationToken, callback) = item;
+                var commandCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+                _currentCommandCts = commandCts;
                 CurrentCommandName = request.command;
                 CurrentCommandStartTime = DateTime.UtcNow;
-                _currentCommand = ProcessCommandAsync(request, cancellationToken, callback);
+                _currentCommand = ProcessCommandAsync(request, commandCts.Token, callback);
             }
         }
 
@@ -79,11 +110,26 @@ namespace UniCli.Server.Editor
             {
                 try
                 {
-                    using var pipeServer = new PipeServer(
+                    var pipeServer = new PipeServer(
                         _pipeName,
                         OnCommandReceived);
 
-                    await pipeServer.WaitForShutdownAsync(cancellationToken);
+                    lock (_pipeServerLock)
+                        _currentPipeServer = pipeServer;
+
+                    try
+                    {
+                        await pipeServer.WaitForShutdownAsync(cancellationToken);
+                    }
+                    finally
+                    {
+                        lock (_pipeServerLock)
+                        {
+                            if (_currentPipeServer == pipeServer)
+                                _currentPipeServer = null;
+                        }
+                        pipeServer.Dispose();
+                    }
                 }
                 catch (OperationCanceledException)
                 {
