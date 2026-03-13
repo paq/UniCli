@@ -188,12 +188,14 @@ namespace UniCli.Server.Editor
                     // Wait for monitor to finish so its I/O callback completes
                     // before we leave this scope.
                     try { await monitorTask; } catch { /* expected */ }
+                    commandCts.Dispose();
                     return false;
                 }
 
                 commandCts.Cancel();
                 // Wait for monitor to finish so its I/O callback completes.
                 try { await monitorTask; } catch { /* expected */ }
+                commandCts.Dispose();
                 var commandResponse = await responseTcs.Task;
 
                 await WriteResponseAsync(server, commandResponse, cancellationToken);
